@@ -1,14 +1,15 @@
-"""Animation Agent — renders one stickman scene per script paragraph (Manim).
+"""Animation Agent — renders a topic-relevant stickman scene per paragraph.
 
-Strategy (from HANDOFF):
-  * Split the script into paragraphs.
-  * For each paragraph render a short stickman scene on a dark background.
-  * Scene length is estimated from the paragraph's word count so the merged
-    video roughly matches the narration length.
+For each script paragraph the agent renders a short animated scene chosen from
+a small visual vocabulary (intro, journey, night camp, discovery,
+investigation, theory, conclusion) — each with a background, props and motion
+(see assets/stickman/scenes.py). Claude acts as a "director", mapping every
+paragraph to the most fitting scene; a deterministic narrative arc is used as a
+fallback when Claude is unavailable.
 
-Full burned-in subtitles are intentionally NOT drawn here — the Assembly Agent
-adds accurate, timed subtitles with Whisper. Set ANIMATION_BURN_TEXT=1 to draw
-a short caption per scene anyway (off by default to avoid double captions).
+Scene length is estimated from the paragraph's word count so the merged video
+roughly matches the narration. Full subtitles are added later by Whisper in the
+assembly agent.
 
 Output: output/scene_01.mp4, output/scene_02.mp4, ...
 Returns: the ordered list of scene file paths.
@@ -20,18 +21,22 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 
-from agents.common import OUTPUT_DIR, get_logger, load_env
+from agents.common import (
+    OUTPUT_DIR,
+    anthropic_client,
+    anthropic_model,
+    get_logger,
+    load_env,
+)
 
 log = get_logger("animation")
 
-# Visual constants (mirrors config/style_profile.md).
 BG_COLOR = "#1a1a2e"
-FG_COLOR = "#FFFFFF"
-ACCENT_COLOR = "#FFD700"
 
 # Pacing: average narrated speaking rate ~2.5 words/second.
 WORDS_PER_SECOND = 2.5
@@ -46,15 +51,12 @@ FRAME_RATE = 30
 def _split_into_paragraphs(text: str) -> list[str]:
     """Split a script into paragraph-sized blocks for one scene each."""
     text = text.strip()
-    # Prefer blank-line separated paragraphs.
     parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if len(parts) > 1:
         return parts
-    # Fall back to single newlines.
     parts = [p.strip() for p in text.split("\n") if p.strip()]
     if len(parts) > 1:
         return parts
-    # Last resort: group sentences into blocks of three.
     sentences = re.split(r"(?<=[.!?])\s+", text)
     blocks, current = [], []
     for s in sentences:
@@ -84,66 +86,71 @@ def _load_script_text(script: str | None) -> str:
     raise FileNotFoundError(f"No script text and {path} does not exist.")
 
 
-def _short_caption(paragraph: str, max_words: int = 10) -> str:
-    words = paragraph.split()
-    return " ".join(words[:max_words]) + ("…" if len(words) > max_words else "")
-
-
-def _build_scene_class(duration: float, caption: str, variant: int):
-    """Create a Manim Scene subclass that animates a stickman for `duration` s."""
-    # Imported lazily so the rest of the pipeline doesn't require manim.
-    from manim import (
-        DOWN,
-        LEFT,
-        RIGHT,
-        UP,
-        Create,
-        FadeIn,
-        Scene,
-        Text,
-        Wiggle,
+def _choose_templates(paragraphs: list[str]) -> list[str]:
+    """Map each paragraph to a scene template, using Claude when available."""
+    from assets.stickman.scenes import (
+        TEMPLATE_DESCRIPTIONS,
+        TEMPLATES,
+        default_template_for,
     )
 
-    from assets.stickman.stickman import Stickman
+    total = len(paragraphs)
+    fallback = [default_template_for(i, total) for i in range(total)]
 
-    burn_text = os.environ.get("ANIMATION_BURN_TEXT", "0") == "1"
+    try:
+        client = anthropic_client()
+        catalog = "\n".join(f"- {k}: {v}" for k, v in TEMPLATE_DESCRIPTIONS.items())
+        numbered = "\n".join(
+            f"{i}. {p[:200]}" for i, p in enumerate(paragraphs)
+        )
+        prompt = (
+            "You are a visual director for a faceless stickman mystery video. "
+            "For each script paragraph, choose the single best scene template "
+            "from this catalog (use the exact keys):\n"
+            f"{catalog}\n\n"
+            "Guidance: the first paragraph is usually 'intro' and the last is "
+            "'conclusion'. Match the paragraph's content to the scene.\n\n"
+            f"PARAGRAPHS:\n{numbered}\n\n"
+            "Reply with ONLY a JSON array of template keys, one per paragraph, "
+            f"length exactly {total}."
+        )
+        resp = client.messages.create(
+            model=anthropic_model(),
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+        start, end = text.find("["), text.rfind("]")
+        chosen = json.loads(text[start : end + 1])
+        result = []
+        for i in range(total):
+            key = str(chosen[i]).strip() if i < len(chosen) else fallback[i]
+            result.append(key if key in TEMPLATES else fallback[i])
+        log.info("Director scene plan: %s", result)
+        return result
+    except Exception as exc:
+        log.warning("Claude director unavailable (%s) — using default arc.", exc)
+        return fallback
+
+
+def _build_scene_class(template_key: str, duration: float):
+    """Create a Manim Scene that renders the chosen template for `duration` s."""
+    from manim import Scene
+
+    from assets.stickman.scenes import TEMPLATES
+
+    builder = TEMPLATES[template_key]
 
     class _MysteryScene(Scene):
         def construct(self):
             self.camera.background_color = BG_COLOR
-
-            stickman = Stickman(color=FG_COLOR)
-            self.play(Create(stickman), run_time=1.0)
-
-            # A small idle gesture so the frame isn't completely static.
-            # Vary the gesture by scene index for a little visual rhythm.
-            gesture_targets = [
-                stickman.right_arm.animate.shift(UP * 0.4 + RIGHT * 0.2),
-                stickman.left_arm.animate.shift(UP * 0.4 + LEFT * 0.2),
-                stickman.animate.shift(LEFT * 0.6),
-                stickman.animate.shift(RIGHT * 0.6),
-            ]
-            self.play(gesture_targets[variant % len(gesture_targets)], run_time=1.0)
-
-            if burn_text and caption:
-                subtitle = Text(
-                    caption, font="sans-serif", color=FG_COLOR, font_size=28,
-                ).to_edge(DOWN, buff=0.5)
-                self.play(FadeIn(subtitle), run_time=0.5)
-
-            # Hold the rest of the estimated duration. The create + gesture
-            # animations above take ~2.0s; keep the scene slightly long so the
-            # video always covers the narration (assembly uses -shortest).
-            remaining = max(0.5, duration - 2.0)
-            self.play(Wiggle(stickman, scale_value=1.04), run_time=min(remaining, 2.0))
-            if remaining > 2.0:
-                self.wait(remaining - 2.0)
+            builder(self, duration)
 
     return _MysteryScene
 
 
 def run(script: str | None = None) -> list[str]:
-    """Render one stickman scene per paragraph and return the scene paths."""
+    """Render one topic-relevant scene per paragraph; return the scene paths."""
     load_env()
     text = _load_script_text(script)
     paragraphs = _split_into_paragraphs(text)
@@ -151,7 +158,6 @@ def run(script: str | None = None) -> list[str]:
         raise ValueError("Script produced no paragraphs to animate.")
     log.info("Rendering %d scene(s).", len(paragraphs))
 
-    # Lazy import: fail clearly if manim isn't installed.
     try:
         from manim import tempconfig
     except ImportError as exc:
@@ -160,18 +166,20 @@ def run(script: str | None = None) -> list[str]:
             "animation agent."
         ) from exc
 
+    templates = _choose_templates(paragraphs)
+
     OUTPUT_DIR.mkdir(exist_ok=True)
     media_dir = OUTPUT_DIR / "manim_media"
 
     scene_paths: list[str] = []
     for i, paragraph in enumerate(paragraphs, 1):
         duration = _estimate_seconds(paragraph)
-        caption = _short_caption(paragraph)
+        template_key = templates[i - 1]
         scene_name = f"scene_{i:02d}"
-        log.info("  %s — ~%.1fs (%d words).", scene_name, duration,
-                 len(paragraph.split()))
+        log.info("  %s [%s] — ~%.1fs (%d words).", scene_name, template_key,
+                 duration, len(paragraph.split()))
 
-        SceneClass = _build_scene_class(duration, caption, variant=i - 1)
+        SceneClass = _build_scene_class(template_key, duration)
         with tempconfig(
             {
                 "pixel_width": PIXEL_WIDTH,
@@ -188,7 +196,6 @@ def run(script: str | None = None) -> list[str]:
             scene.render()
             rendered = scene.renderer.file_writer.movie_file_path
 
-        # Copy the rendered file to a stable, flat location in output/.
         dest = OUTPUT_DIR / f"{scene_name}.mp4"
         shutil.copyfile(rendered, dest)
         scene_paths.append(str(dest))

@@ -15,7 +15,7 @@ research → script → tts → animation → assembly → thumbnail → upload 
 |------------|-----------------------------|---------------|
 | research   | `agents/research_agent.py`  | ✅ implemented |
 | script     | `agents/script_agent.py`    | ✅ implemented |
-| tts        | `agents/tts_agent.py`       | 🚧 placeholder |
+| tts        | `agents/tts_agent.py`       | ✅ implemented |
 | animation  | `agents/animation_agent.py` | 🚧 placeholder |
 | assembly   | `agents/assembly_agent.py`  | 🚧 placeholder |
 | thumbnail  | `agents/thumbnail_agent.py` | 🚧 placeholder |

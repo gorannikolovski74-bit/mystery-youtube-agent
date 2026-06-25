@@ -19,7 +19,7 @@ research → script → tts → animation → assembly → thumbnail → upload 
 | animation  | `agents/animation_agent.py` | ✅ implemented |
 | assembly   | `agents/assembly_agent.py`  | ✅ implemented |
 | thumbnail  | `agents/thumbnail_agent.py` | ✅ implemented |
-| upload     | `agents/upload_agent.py`    | 🚧 placeholder |
+| upload     | `agents/upload_agent.py`    | ✅ implemented |
 | alert      | `agents/alert_agent.py`     | ✅ implemented |
 
 ## Quick start
@@ -52,6 +52,9 @@ Copy `config/apis.env.example` → `config/apis.env` and fill in:
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — for alerts.
 
 Channel tone, structure and visual rules live in `config/style_profile.md`.
+
+Full server setup (Droplet packages, Kokoro model, YouTube OAuth, cron) is in
+**[DEPLOY.md](DEPLOY.md)**.
 
 ## Daily cron (on the server)
 

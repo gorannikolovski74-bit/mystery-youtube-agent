@@ -10,7 +10,7 @@ publish daily videos automatically.
 ```bash
 sudo apt update
 sudo apt install -y python3-pip python3-venv \
-    ffmpeg libcairo2-dev libpango1.0-dev pkg-config imagemagick
+    ffmpeg libcairo2-dev libpango1.0-dev pkg-config imagemagick espeak-ng
 ```
 
 ## 2. Project + Python deps
@@ -26,9 +26,10 @@ pip install -r requirements.txt
 ## 3. Kokoro TTS model files (one-time download)
 
 ```bash
-wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/kokoro-v1.0.onnx
-wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files/voices.bin
+wget https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+wget -O voices.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
 # Keep them in the project root, or point KOKORO_MODEL / KOKORO_VOICES at them.
+# Kokoro phonemization needs espeak-ng: `sudo apt install -y espeak-ng`.
 ```
 
 ## 4. Secrets

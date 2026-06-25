@@ -16,13 +16,19 @@ research → script → tts → animation → assembly → thumbnail → upload 
 | research   | `agents/research_agent.py`  | ✅ implemented |
 | script     | `agents/script_agent.py`    | ✅ implemented |
 | tts        | `agents/tts_agent.py`       | ✅ implemented |
-| animation  | `agents/animation_agent.py` | 🚧 placeholder |
+| animation  | `agents/animation_agent.py` | ✅ implemented |
 | assembly   | `agents/assembly_agent.py`  | 🚧 placeholder |
 | thumbnail  | `agents/thumbnail_agent.py` | 🚧 placeholder |
 | upload     | `agents/upload_agent.py`    | 🚧 placeholder |
 | alert      | `agents/alert_agent.py`     | ✅ implemented |
 
 ## Quick start
+
+System packages (Ubuntu) needed for animation/assembly:
+
+```bash
+sudo apt update && sudo apt install -y ffmpeg libcairo2-dev libpango1.0-dev pkg-config
+```
 
 ```bash
 pip install -r requirements.txt

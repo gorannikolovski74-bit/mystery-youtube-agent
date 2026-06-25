@@ -12,6 +12,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
 
 from agents.common import get_logger, load_env
 
@@ -58,9 +59,16 @@ def run(steps: list[str] | None = None, topic_override: str | None = None) -> di
 
         if "animation" in steps:
             step = "animation"
-            from agents import animation_agent
+            # Visuals can be stickman animation (default) or stock footage.
+            if os.environ.get("VISUAL_MODE", "animation").lower() == "stock":
+                from agents import stock_agent
 
-            state["scenes"] = animation_agent.run(state["script"])
+                topic_hint = state.get("topic", {}).get("topic", "")
+                state["scenes"] = stock_agent.run(state["script"], topic_hint=topic_hint)
+            else:
+                from agents import animation_agent
+
+                state["scenes"] = animation_agent.run(state["script"])
 
         if "assembly" in steps:
             step = "assembly"

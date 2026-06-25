@@ -1,0 +1,33 @@
+# Secrets — never commit
+config/apis.env
+*.env
+!config/apis.env.example
+
+# OAuth tokens / credentials
+config/token.json
+config/client_secret*.json
+token.pickle
+
+# Generated media & temp files
+output/*
+!output/.gitkeep
+
+# Logs
+logs/*.log
+logs/*.txt
+
+# Model files (downloaded separately, large)
+*.onnx
+voices.bin
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

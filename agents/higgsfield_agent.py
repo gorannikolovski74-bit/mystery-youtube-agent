@@ -1,18 +1,18 @@
-"""Higgsfield Agent — cinematic AI video scenes via Higgsfield.ai API.
+"""Higgsfield Agent — cinematic AI video scenes via Higgsfield MCP server.
 
-Drop-in alternative to animation/stock/image agents: for each script paragraph
-Claude writes a cinematic video prompt, Higgsfield generates a short video clip,
-and the clips are saved as scene_NN.mp4 for the assembly agent.
+Claude connects to the Higgsfield MCP server (https://mcp.higgsfield.ai/mcp)
+and calls its video-generation tools directly. For each script paragraph Claude
+writes a cinematic prompt and generates a short video clip saved as scene_NN.mp4.
 
-Setup:
-  HIGGSFIELD_API_KEY=<key>   # higgsfield.ai -> Settings -> API Keys
-  VISUAL_MODE=higgsfield     # in config/apis.env
+Setup in config/apis.env:
+  VISUAL_MODE=higgsfield
+  HIGGSFIELD_MCP_URL=https://mcp.higgsfield.ai/mcp
+  HIGGSFIELD_API_KEY=<key>        # higgsfield.ai -> Settings -> API Keys
 
 Optional tunables:
-  HIGGSFIELD_MODEL=higgsfield-1          # or higgsfield-1-turbo for speed
   HIGGSFIELD_ASPECT=16:9
-  HIGGSFIELD_POLL_INTERVAL=5             # seconds between status polls
-  HIGGSFIELD_TIMEOUT=300                 # max seconds to wait per clip
+  HIGGSFIELD_DURATION=5           # seconds per clip (default: estimated from words)
+  HIGGSFIELD_TIMEOUT=300          # max seconds to wait per clip
 
 Output: output/scene_01.mp4, ... ; returns ordered scene paths.
 
@@ -23,9 +23,8 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import time
+import re
 
 import requests
 
@@ -44,31 +43,105 @@ from agents.common import (
 
 log = get_logger("higgsfield")
 
-API_BASE = "https://api.higgsfield.ai/v1"
-HTTP_TIMEOUT = 60
-
-# Cinematic style appended to every prompt — keeps mystery atmosphere consistent.
 STYLE_SUFFIX = (
     ", cinematic documentary style, dark moody atmosphere, dramatic lighting, "
-    "high quality, no text overlays, no people faces visible"
+    "4K quality, no text overlays, no visible human faces"
 )
 
 HTTP = requests.Session()
+HTTP.headers.update({"User-Agent": "mystery-agent/1.0"})
 
 
-def _auth_headers() -> dict[str, str]:
+def _higgsfield_key() -> str:
     key = os.environ.get("HIGGSFIELD_API_KEY", "")
     if not key:
         raise RuntimeError(
-            "HIGGSFIELD_API_KEY is not set. Add it to config/apis.env."
+            "HIGGSFIELD_API_KEY is not set. Add it to config/apis.env.\n"
+            "Get your key at higgsfield.ai -> Settings -> API Keys."
         )
-    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    return key
+
+
+def _mcp_url() -> str:
+    return os.environ.get("HIGGSFIELD_MCP_URL", "https://mcp.higgsfield.ai/mcp")
+
+
+# --- Core: Claude + Higgsfield MCP -------------------------------------------
+
+def _generate_scene_via_mcp(
+    scene_name: str,
+    video_prompt: str,
+    duration: float,
+    dest: str,
+) -> None:
+    """Ask Claude to generate one video clip using the Higgsfield MCP server."""
+    client = anthropic_client()
+    aspect = os.environ.get("HIGGSFIELD_ASPECT", "16:9")
+    clip_seconds = max(2, min(10, round(duration)))
+    timeout = int(os.environ.get("HIGGSFIELD_TIMEOUT", "300"))
+
+    full_prompt = video_prompt + STYLE_SUFFIX
+
+    task = (
+        f"Generate a {clip_seconds}-second cinematic video clip using the Higgsfield "
+        f"video generation tool. Use this prompt exactly:\n\n"
+        f'"{full_prompt}"\n\n'
+        f"Aspect ratio: {aspect}. Duration: {clip_seconds} seconds.\n"
+        f"Wait for the generation to complete (poll if needed, up to {timeout}s), "
+        f"then return ONLY the final video download URL — nothing else."
+    )
+
+    resp = client.beta.messages.create(
+        model=anthropic_model(),
+        max_tokens=1024,
+        messages=[{"role": "user", "content": task}],
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": _mcp_url(),
+                "name": "higgsfield",
+                "authorization_token": _higgsfield_key(),
+            }
+        ],
+        betas=["mcp-client-2025-04-04"],
+    )
+
+    # Extract the video URL from Claude's final text response.
+    video_url = None
+    for block in resp.content:
+        if hasattr(block, "text"):
+            urls = re.findall(r"https?://\S+\.mp4\S*", block.text)
+            if urls:
+                video_url = urls[0].rstrip(".,)")
+                break
+            # Fallback: grab any https URL in the reply.
+            urls = re.findall(r"https?://\S+", block.text)
+            if urls:
+                video_url = urls[0].rstrip(".,)")
+                break
+
+    if not video_url:
+        raw = " | ".join(
+            getattr(b, "text", repr(b))[:200] for b in resp.content
+        )
+        raise RuntimeError(
+            f"Higgsfield MCP returned no video URL for {scene_name}. "
+            f"Claude response: {raw}"
+        )
+
+    log.info("    downloading %s from %s", scene_name, video_url[:80])
+    r = HTTP.get(video_url, timeout=300, stream=True)
+    r.raise_for_status()
+    with open(dest, "wb") as fh:
+        for chunk in r.iter_content(chunk_size=1 << 16):
+            fh.write(chunk)
 
 
 # --- Prompt generation -------------------------------------------------------
 
 def _video_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
     """Use Claude to write one cinematic video prompt per paragraph."""
+    import json
     fallback = [f"{topic_hint}, mysterious cinematic scene" for _ in paragraphs]
     try:
         client = anthropic_client()
@@ -100,86 +173,6 @@ def _video_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
         return fallback
 
 
-# --- Higgsfield API ----------------------------------------------------------
-
-def _submit_generation(prompt: str, duration: float) -> str:
-    """Submit a video generation job; return the job id."""
-    model = os.environ.get("HIGGSFIELD_MODEL", "higgsfield-1")
-    aspect = os.environ.get("HIGGSFIELD_ASPECT", "16:9")
-    # Higgsfield accepts duration in whole seconds (min 2, max 10 per clip).
-    clip_seconds = max(2, min(10, round(duration)))
-
-    payload = {
-        "prompt": prompt + STYLE_SUFFIX,
-        "model": model,
-        "aspect_ratio": aspect,
-        "duration": clip_seconds,
-    }
-    resp = HTTP.post(
-        f"{API_BASE}/video/generate",
-        headers=_auth_headers(),
-        json=payload,
-        timeout=HTTP_TIMEOUT,
-    )
-    if not resp.ok:
-        raise RuntimeError(
-            f"Higgsfield submit failed ({resp.status_code}): {resp.text[:300]}"
-        )
-    data = resp.json()
-    job_id = data.get("id") or data.get("job_id") or data.get("generation_id")
-    if not job_id:
-        raise RuntimeError(f"No job id in Higgsfield response: {data}")
-    return str(job_id)
-
-
-def _poll_until_done(job_id: str) -> str:
-    """Poll the job status until complete; return the video URL."""
-    interval = float(os.environ.get("HIGGSFIELD_POLL_INTERVAL", "5"))
-    timeout = float(os.environ.get("HIGGSFIELD_TIMEOUT", "300"))
-    deadline = time.time() + timeout
-
-    while time.time() < deadline:
-        resp = HTTP.get(
-            f"{API_BASE}/video/status/{job_id}",
-            headers=_auth_headers(),
-            timeout=HTTP_TIMEOUT,
-        )
-        if not resp.ok:
-            raise RuntimeError(
-                f"Higgsfield status check failed ({resp.status_code}): {resp.text[:200]}"
-            )
-        data = resp.json()
-        status = (data.get("status") or "").lower()
-
-        if status in ("completed", "succeeded", "success", "done"):
-            url = (
-                data.get("video_url")
-                or data.get("output_url")
-                or (data.get("output") or [None])[0]
-            )
-            if not url:
-                raise RuntimeError(f"Job done but no video URL found: {data}")
-            return str(url)
-
-        if status in ("failed", "error", "cancelled"):
-            raise RuntimeError(f"Higgsfield generation {job_id} failed: {data}")
-
-        log.info("    [%s] status=%s — waiting %.0fs…", job_id[:8], status, interval)
-        time.sleep(interval)
-
-    raise TimeoutError(
-        f"Higgsfield job {job_id} did not complete within {timeout}s."
-    )
-
-
-def _download(url: str, dest: str) -> None:
-    resp = HTTP.get(url, timeout=300, stream=True)
-    resp.raise_for_status()
-    with open(dest, "wb") as fh:
-        for chunk in resp.iter_content(chunk_size=1 << 16):
-            fh.write(chunk)
-
-
 # --- Public entry point ------------------------------------------------------
 
 def run(script: str | None = None, topic_hint: str = "") -> list[str]:
@@ -190,9 +183,9 @@ def run(script: str | None = None, topic_hint: str = "") -> list[str]:
     if not paragraphs:
         raise ValueError("Script produced no paragraphs.")
 
-    model = os.environ.get("HIGGSFIELD_MODEL", "higgsfield-1")
     log.info(
-        "Generating %d Higgsfield scene(s) with model=%s.", len(paragraphs), model
+        "Generating %d Higgsfield scene(s) via MCP (%s).",
+        len(paragraphs), _mcp_url(),
     )
 
     prompts = _video_prompts(topic_hint, paragraphs)
@@ -203,27 +196,19 @@ def run(script: str | None = None, topic_hint: str = "") -> list[str]:
         duration = _estimate_seconds(paragraph)
         prompt = prompts[i - 1]
         scene_name = f"scene_{i:02d}"
+        dest = str(OUTPUT_DIR / f"{scene_name}.mp4")
         log.info("  %s — '%s' (~%.1fs).", scene_name, prompt[:60], duration)
+        _generate_scene_via_mcp(scene_name, prompt, duration, dest)
+        scene_paths.append(dest)
+        log.info("    saved → %s", dest)
 
-        try:
-            job_id = _submit_generation(prompt, duration)
-            log.info("    submitted job %s.", job_id[:16])
-            video_url = _poll_until_done(job_id)
-            dest = str(OUTPUT_DIR / f"{scene_name}.mp4")
-            _download(video_url, dest)
-            scene_paths.append(dest)
-            log.info("    saved → %s", dest)
-        except Exception as exc:
-            log.error("  Scene %s failed: %s", scene_name, exc)
-            raise
-
-    log.info("Generated %d Higgsfield scenes into %s.", len(scene_paths), OUTPUT_DIR)
+    log.info("Generated %d scenes into %s.", len(scene_paths), OUTPUT_DIR)
     return scene_paths
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Higgsfield AI video scene generator."
+        description="Higgsfield AI video scene generator (Claude MCP)."
     )
     parser.add_argument(
         "--script", help="Script text or path (default output/script.txt)."

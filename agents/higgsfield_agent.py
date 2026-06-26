@@ -1,18 +1,19 @@
-"""Higgsfield Agent — cinematic AI video scenes via Higgsfield MCP server.
+"""Higgsfield Agent — cinematic AI video scenes via Higgsfield CLI + MCP.
 
-Claude connects to the Higgsfield MCP server (https://mcp.higgsfield.ai/mcp)
-and calls its video-generation tools directly. For each script paragraph Claude
-writes a cinematic prompt and generates a short video clip saved as scene_NN.mp4.
+Uses the official @higgsfield/cli tool (OAuth-authenticated) to generate
+cinematic video clips for each script paragraph.
 
-Setup in config/apis.env:
+One-time setup:
+  npm install -g @higgsfield/cli
+  higgsfield auth login          # opens browser, saves token locally
+
+Then set in config/apis.env:
   VISUAL_MODE=higgsfield
-  HIGGSFIELD_MCP_URL=https://mcp.higgsfield.ai/mcp
-  HIGGSFIELD_API_KEY=<key>        # higgsfield.ai -> Settings -> API Keys
 
 Optional tunables:
+  HIGGSFIELD_MCP_URL=https://mcp.higgsfield.ai/mcp   # default
   HIGGSFIELD_ASPECT=16:9
-  HIGGSFIELD_DURATION=5           # seconds per clip (default: estimated from words)
-  HIGGSFIELD_TIMEOUT=300          # max seconds to wait per clip
+  HIGGSFIELD_TIMEOUT=300         # max seconds to wait per clip
 
 Output: output/scene_01.mp4, ... ; returns ordered scene paths.
 
@@ -23,8 +24,11 @@ Run standalone:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import shutil
+import subprocess
 
 import requests
 
@@ -43,6 +47,8 @@ from agents.common import (
 
 log = get_logger("higgsfield")
 
+MCP_URL = "https://mcp.higgsfield.ai/mcp"
+
 STYLE_SUFFIX = (
     ", cinematic documentary style, dark moody atmosphere, dramatic lighting, "
     "4K quality, no text overlays, no visible human faces"
@@ -52,96 +58,62 @@ HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": "mystery-agent/1.0"})
 
 
-def _higgsfield_key() -> str:
-    key = os.environ.get("HIGGSFIELD_API_KEY", "")
-    if not key:
+def _cli_path() -> str:
+    """Return the higgsfield CLI path, or raise if not installed."""
+    path = shutil.which("higgsfield")
+    if not path:
         raise RuntimeError(
-            "HIGGSFIELD_API_KEY is not set. Add it to config/apis.env.\n"
-            "Get your key at higgsfield.ai -> Settings -> API Keys."
+            "Higgsfield CLI not found.\n"
+            "Install it with:  npm install -g @higgsfield/cli\n"
+            "Then auth once:   higgsfield auth login"
         )
-    return key
+    return path
 
 
 def _mcp_url() -> str:
-    return os.environ.get("HIGGSFIELD_MCP_URL", "https://mcp.higgsfield.ai/mcp")
+    return os.environ.get("HIGGSFIELD_MCP_URL", MCP_URL)
 
 
-# --- Core: Claude + Higgsfield MCP -------------------------------------------
+def _stored_token() -> str | None:
+    """Try to read the OAuth token stored by `higgsfield auth login`."""
+    candidates = [
+        os.path.expanduser("~/.higgsfield/token"),
+        os.path.expanduser("~/.higgsfield/auth.json"),
+        os.path.expanduser("~/.config/higgsfield/token"),
+        os.path.expanduser("~/.config/higgsfield/auth.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                text = open(path).read().strip()
+                # JSON auth file: {"access_token": "..."}
+                try:
+                    data = json.loads(text)
+                    return data.get("access_token") or data.get("token")
+                except json.JSONDecodeError:
+                    return text  # plain token file
+            except Exception:
+                pass
 
-def _generate_scene_via_mcp(
-    scene_name: str,
-    video_prompt: str,
-    duration: float,
-    dest: str,
-) -> None:
-    """Ask Claude to generate one video clip using the Higgsfield MCP server."""
-    client = anthropic_client()
-    aspect = os.environ.get("HIGGSFIELD_ASPECT", "16:9")
-    clip_seconds = max(2, min(10, round(duration)))
-    timeout = int(os.environ.get("HIGGSFIELD_TIMEOUT", "300"))
-
-    full_prompt = video_prompt + STYLE_SUFFIX
-
-    task = (
-        f"Generate a {clip_seconds}-second cinematic video clip using the Higgsfield "
-        f"video generation tool. Use this prompt exactly:\n\n"
-        f'"{full_prompt}"\n\n'
-        f"Aspect ratio: {aspect}. Duration: {clip_seconds} seconds.\n"
-        f"Wait for the generation to complete (poll if needed, up to {timeout}s), "
-        f"then return ONLY the final video download URL — nothing else."
-    )
-
-    resp = client.beta.messages.create(
-        model=anthropic_model(),
-        max_tokens=1024,
-        messages=[{"role": "user", "content": task}],
-        mcp_servers=[
-            {
-                "type": "url",
-                "url": _mcp_url(),
-                "name": "higgsfield",
-                "authorization_token": _higgsfield_key(),
-            }
-        ],
-        betas=["mcp-client-2025-04-04"],
-    )
-
-    # Extract the video URL from Claude's final text response.
-    video_url = None
-    for block in resp.content:
-        if hasattr(block, "text"):
-            urls = re.findall(r"https?://\S+\.mp4\S*", block.text)
-            if urls:
-                video_url = urls[0].rstrip(".,)")
-                break
-            # Fallback: grab any https URL in the reply.
-            urls = re.findall(r"https?://\S+", block.text)
-            if urls:
-                video_url = urls[0].rstrip(".,)")
-                break
-
-    if not video_url:
-        raw = " | ".join(
-            getattr(b, "text", repr(b))[:200] for b in resp.content
+    # Fallback: ask the CLI for the token.
+    try:
+        result = subprocess.run(
+            [_cli_path(), "auth", "token"],
+            capture_output=True, text=True, timeout=10,
         )
-        raise RuntimeError(
-            f"Higgsfield MCP returned no video URL for {scene_name}. "
-            f"Claude response: {raw}"
-        )
+        token = result.stdout.strip()
+        if token and not token.startswith("Error"):
+            return token
+    except Exception:
+        pass
 
-    log.info("    downloading %s from %s", scene_name, video_url[:80])
-    r = HTTP.get(video_url, timeout=300, stream=True)
-    r.raise_for_status()
-    with open(dest, "wb") as fh:
-        for chunk in r.iter_content(chunk_size=1 << 16):
-            fh.write(chunk)
+    return None
 
 
 # --- Prompt generation -------------------------------------------------------
 
 def _video_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
     """Use Claude to write one cinematic video prompt per paragraph."""
-    import json
     fallback = [f"{topic_hint}, mysterious cinematic scene" for _ in paragraphs]
     try:
         client = anthropic_client()
@@ -173,6 +145,102 @@ def _video_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
         return fallback
 
 
+# --- Scene generation --------------------------------------------------------
+
+def _generate_via_mcp_client(
+    scene_name: str, video_prompt: str, duration: float, dest: str
+) -> None:
+    """Use Claude + Higgsfield MCP server (OAuth token from CLI) to generate a clip."""
+    client = anthropic_client()
+    token = _stored_token()
+    if not token:
+        raise RuntimeError(
+            "No Higgsfield auth token found. Run:  higgsfield auth login"
+        )
+
+    aspect = os.environ.get("HIGGSFIELD_ASPECT", "16:9")
+    clip_seconds = max(2, min(10, round(duration)))
+    timeout = int(os.environ.get("HIGGSFIELD_TIMEOUT", "300"))
+    full_prompt = video_prompt + STYLE_SUFFIX
+
+    task = (
+        f"Generate a {clip_seconds}-second cinematic video clip using the Higgsfield "
+        f"video generation tool. Prompt:\n\n\"{full_prompt}\"\n\n"
+        f"Aspect ratio: {aspect}. Duration: {clip_seconds}s. "
+        f"Wait for completion (up to {timeout}s), then return ONLY the download URL."
+    )
+
+    resp = client.beta.messages.create(
+        model=anthropic_model(),
+        max_tokens=1024,
+        messages=[{"role": "user", "content": task}],
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": _mcp_url(),
+                "name": "higgsfield",
+                "authorization_token": token,
+            }
+        ],
+        betas=["mcp-client-2025-04-04"],
+    )
+
+    video_url = None
+    for block in resp.content:
+        if hasattr(block, "text"):
+            urls = re.findall(r"https?://\S+\.mp4\S*", block.text)
+            if urls:
+                video_url = urls[0].rstrip(".,)")
+                break
+            urls = re.findall(r"https?://\S+", block.text)
+            if urls:
+                video_url = urls[0].rstrip(".,)")
+                break
+
+    if not video_url:
+        raw = " | ".join(getattr(b, "text", repr(b))[:200] for b in resp.content)
+        raise RuntimeError(
+            f"No video URL returned for {scene_name}. Claude said: {raw}"
+        )
+
+    log.info("    downloading %s from %s", scene_name, video_url[:80])
+    r = HTTP.get(video_url, timeout=300, stream=True)
+    r.raise_for_status()
+    with open(dest, "wb") as fh:
+        for chunk in r.iter_content(chunk_size=1 << 16):
+            fh.write(chunk)
+
+
+def _generate_via_cli(
+    scene_name: str, video_prompt: str, duration: float, dest: str
+) -> None:
+    """Fallback: call the higgsfield CLI directly via subprocess."""
+    cli = _cli_path()
+    clip_seconds = max(2, min(10, round(duration)))
+    full_prompt = video_prompt + STYLE_SUFFIX
+
+    cmd = [
+        cli, "generate", "video",
+        "--prompt", full_prompt,
+        "--duration", str(clip_seconds),
+        "--output", dest,
+    ]
+    aspect = os.environ.get("HIGGSFIELD_ASPECT", "16:9")
+    cmd += ["--aspect-ratio", aspect]
+
+    timeout = int(os.environ.get("HIGGSFIELD_TIMEOUT", "300"))
+    log.info("    CLI: %s", " ".join(cmd[:6]) + " ...")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"higgsfield CLI failed for {scene_name}:\n{result.stderr[:400]}"
+        )
+    if not os.path.exists(dest):
+        raise RuntimeError(
+            f"CLI succeeded but {dest} not found. stdout: {result.stdout[:200]}"
+        )
+
+
 # --- Public entry point ------------------------------------------------------
 
 def run(script: str | None = None, topic_hint: str = "") -> list[str]:
@@ -183,13 +251,18 @@ def run(script: str | None = None, topic_hint: str = "") -> list[str]:
     if not paragraphs:
         raise ValueError("Script produced no paragraphs.")
 
-    log.info(
-        "Generating %d Higgsfield scene(s) via MCP (%s).",
-        len(paragraphs), _mcp_url(),
-    )
+    log.info("Generating %d Higgsfield scene(s).", len(paragraphs))
 
     prompts = _video_prompts(topic_hint, paragraphs)
     OUTPUT_DIR.mkdir(exist_ok=True)
+
+    # Prefer MCP client (token auto-discovered); fall back to CLI subprocess.
+    token = _stored_token()
+    use_mcp = token is not None
+    if use_mcp:
+        log.info("Auth token found — using MCP client.")
+    else:
+        log.info("No token found — trying CLI subprocess (needs `higgsfield auth login`).")
 
     scene_paths: list[str] = []
     for i, paragraph in enumerate(paragraphs, 1):
@@ -198,7 +271,12 @@ def run(script: str | None = None, topic_hint: str = "") -> list[str]:
         scene_name = f"scene_{i:02d}"
         dest = str(OUTPUT_DIR / f"{scene_name}.mp4")
         log.info("  %s — '%s' (~%.1fs).", scene_name, prompt[:60], duration)
-        _generate_scene_via_mcp(scene_name, prompt, duration, dest)
+
+        if use_mcp:
+            _generate_via_mcp_client(scene_name, prompt, duration, dest)
+        else:
+            _generate_via_cli(scene_name, prompt, duration, dest)
+
         scene_paths.append(dest)
         log.info("    saved → %s", dest)
 
@@ -208,7 +286,7 @@ def run(script: str | None = None, topic_hint: str = "") -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Higgsfield AI video scene generator (Claude MCP)."
+        description="Higgsfield AI video scene generator."
     )
     parser.add_argument(
         "--script", help="Script text or path (default output/script.txt)."

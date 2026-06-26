@@ -59,12 +59,17 @@ def run(steps: list[str] | None = None, topic_override: str | None = None) -> di
 
         if "animation" in steps:
             step = "animation"
-            # Visuals can be stickman animation (default) or stock footage.
-            if os.environ.get("VISUAL_MODE", "animation").lower() == "stock":
+            # Visuals: stickman animation (default), stock footage, or AI images.
+            mode = os.environ.get("VISUAL_MODE", "animation").lower()
+            topic_hint = state.get("topic", {}).get("topic", "")
+            if mode == "stock":
                 from agents import stock_agent
 
-                topic_hint = state.get("topic", {}).get("topic", "")
                 state["scenes"] = stock_agent.run(state["script"], topic_hint=topic_hint)
+            elif mode == "images":
+                from agents import image_agent
+
+                state["scenes"] = image_agent.run(state["script"], topic_hint=topic_hint)
             else:
                 from agents import animation_agent
 

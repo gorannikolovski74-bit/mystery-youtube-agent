@@ -54,9 +54,25 @@ STYLE_SUFFIX = (
 
 
 # --- Prompts -----------------------------------------------------------------
+def _extract_era(topic_hint: str, paragraphs: list[str]) -> str:
+    combined = (topic_hint + " " + " ".join(paragraphs[:3])).lower()
+    if any(str(y) in combined for y in range(1900, 1970)):
+        return "1950s Soviet era, film grain, vintage aesthetic"
+    if any(str(y) in combined for y in range(1970, 1990)):
+        return "1970s vintage aesthetic, film grain"
+    if "ancient" in combined or "medieval" in combined:
+        return "ancient historical setting"
+    return ""
+
+
 def _image_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
     """One cinematic image prompt per paragraph."""
     fallback = [f"{topic_hint}, mysterious dark scene" for _ in paragraphs]
+    era = _extract_era(topic_hint, paragraphs)
+    era_note = (
+        f"IMPORTANT: Set in {era}. No modern technology, no drones, no SUVs, "
+        "no modern clothing. Period-authentic details only.\n\n"
+    ) if era else ""
     try:
         client = anthropic_client()
         numbered = "\n".join(f"{i}. {p[:220]}" for i, p in enumerate(paragraphs))
@@ -66,6 +82,7 @@ def _image_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
             "description (a place, object, or atmosphere) — landscapes, weather, "
             "objects, interiors. No real or named people, no on-screen text. "
             "Keep each under 25 words.\n\n"
+            + era_note +
             f"TOPIC: {topic_hint}\n\nPARAGRAPHS:\n{numbered}\n\n"
             "Reply with ONLY a JSON array of prompt strings, length exactly "
             f"{len(paragraphs)}."

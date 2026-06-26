@@ -49,19 +49,46 @@ HTTP.headers.update({"User-Agent": "mystery-agent/1.0 (stock footage fetcher)"})
 
 
 # --- Visual search queries ---------------------------------------------------
+def _extract_era(topic_hint: str, paragraphs: list[str]) -> str:
+    """Guess the historical era from the topic/script for era-aware queries."""
+    combined = (topic_hint + " " + " ".join(paragraphs[:3])).lower()
+    if any(str(y) in combined for y in range(1900, 1970)):
+        return "vintage 1950s archival"
+    if any(str(y) in combined for y in range(1970, 1990)):
+        return "vintage 1970s archival"
+    if "ancient" in combined or "medieval" in combined:
+        return "ancient historical"
+    return ""
+
+
 def _search_queries(topic_hint: str, paragraphs: list[str]) -> list[str]:
     """One short stock-search query per paragraph (atmospheric b-roll)."""
     fallback = [topic_hint or "dark mysterious atmosphere"] * len(paragraphs)
+    era = _extract_era(topic_hint, paragraphs)
     try:
         client = anthropic_client()
         numbered = "\n".join(f"{i}. {p[:200]}" for i, p in enumerate(paragraphs))
+        era_guidance = (
+            f"IMPORTANT: This story is set in the era: {era}. "
+            "All queries must reflect that time period — no modern technology, "
+            "no drones, no SUVs, no modern clothing, no smartphones. "
+            "Use: vintage film grain, archival footage, period-appropriate gear, "
+            "Soviet-era or mid-century aesthetics where relevant.\n\n"
+        ) if era else ""
         prompt = (
             "You pick stock-video b-roll for a faceless mystery documentary. "
             "For each paragraph, give a SHORT search query (2-4 words) for "
             "atmospheric, non-specific footage that fits the mood — e.g. "
             "'snowy mountains night', 'abandoned tent snow', 'dark forest fog', "
             "'old documents desk', 'candle dark room'. Prefer landscapes, "
-            "nature, weather, objects; avoid recognizable faces or text.\n\n"
+            "nature, weather, objects; avoid recognizable faces or modern text.\n\n"
+            + era_guidance +
+            "STRICT RULES:\n"
+            "- No drones, no aerial modern shots\n"
+            "- No modern vehicles (SUV, cars post-1970)\n"
+            "- No modern clothing or gear\n"
+            "- Prefer: wilderness, snow, forests, old maps, vintage equipment, "
+            "candlelight, fog, mountains, archival textures\n\n"
             f"TOPIC: {topic_hint}\n\nPARAGRAPHS:\n{numbered}\n\n"
             "Reply with ONLY a JSON array of query strings, length exactly "
             f"{len(paragraphs)}."

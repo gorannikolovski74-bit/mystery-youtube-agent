@@ -88,17 +88,27 @@ def _image_prompts(topic_hint: str, paragraphs: list[str]) -> list[str]:
 
 # --- Image providers ---------------------------------------------------------
 def _fetch_pollinations(prompt: str, seed: int, dest: str) -> None:
+    import time
     encoded = urllib.parse.quote(prompt + STYLE_SUFFIX)
     url = f"https://image.pollinations.ai/prompt/{encoded}"
-    resp = HTTP.get(
-        url,
-        params={"width": 1280, "height": 720, "nologo": "true",
-                "model": os.environ.get("IMAGE_MODEL", "flux"), "seed": seed},
-        timeout=HTTP_TIMEOUT,
-    )
-    resp.raise_for_status()
-    with open(dest, "wb") as fh:
-        fh.write(resp.content)
+    for attempt in range(4):
+        try:
+            resp = HTTP.get(
+                url,
+                params={"width": 1280, "height": 720, "nologo": "true",
+                        "model": os.environ.get("IMAGE_MODEL", "flux"), "seed": seed + attempt},
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            with open(dest, "wb") as fh:
+                fh.write(resp.content)
+            return
+        except Exception as exc:
+            if attempt == 3:
+                raise
+            wait = 2 ** attempt
+            log.warning("Pollinations attempt %d failed (%s) — retrying in %ds.", attempt + 1, exc, wait)
+            time.sleep(wait)
 
 
 def _fetch_openai(prompt: str, seed: int, dest: str) -> None:

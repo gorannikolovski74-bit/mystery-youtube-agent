@@ -70,6 +70,10 @@ def run(steps: list[str] | None = None, topic_override: str | None = None) -> di
                 from agents import image_agent
 
                 state["scenes"] = image_agent.run(state["script"], topic_hint=topic_hint)
+            elif mode == "higgsfield":
+                from agents import higgsfield_agent
+
+                state["scenes"] = higgsfield_agent.run(state["script"], topic_hint=topic_hint)
             else:
                 from agents import animation_agent
 

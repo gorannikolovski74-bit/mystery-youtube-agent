@@ -80,7 +80,7 @@ def _add_narration(audio: str) -> None:
         raise FileNotFoundError(f"Narration audio missing: {audio}")
     _run_ffmpeg([
         "-i", str(MERGED), "-i", str(audio),
-        "-c:v", "copy", "-c:a", "aac", "-shortest", str(WITH_AUDIO),
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", str(WITH_AUDIO),
     ])
 
 

@@ -75,27 +75,13 @@ def _mcp_url() -> str:
 
 
 def _stored_token() -> str | None:
-    """Try to read the OAuth token stored by `higgsfield auth login`."""
-    candidates = [
-        os.path.expanduser("~/.higgsfield/token"),
-        os.path.expanduser("~/.higgsfield/auth.json"),
-        os.path.expanduser("~/.config/higgsfield/token"),
-        os.path.expanduser("~/.config/higgsfield/auth.json"),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                text = open(path).read().strip()
-                # JSON auth file: {"access_token": "..."}
-                try:
-                    data = json.loads(text)
-                    return data.get("access_token") or data.get("token")
-                except json.JSONDecodeError:
-                    return text  # plain token file
-            except Exception:
-                pass
+    """Return the Higgsfield auth token from env or CLI."""
+    # Prefer explicit env var (set in config/apis.env).
+    token = os.environ.get("HIGGSFIELD_API_KEY", "").strip()
+    if token:
+        return token
 
-    # Fallback: ask the CLI for the token.
+    # Fallback: ask the CLI.
     try:
         result = subprocess.run(
             [_cli_path(), "auth", "token"],
